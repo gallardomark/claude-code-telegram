@@ -2810,4 +2810,4 @@ voice = ["mistralai", "openai"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "410fc912359368424b1c283e2c08d698ceb3a3981a479c1f90125f551afe44e9"
+content-hash = "c15976d9e1bc772bd4e6844b5102e8fe518c64a512da7acae5a1d1f7f291d431"

@@ -66,6 +66,7 @@ async def handle_callback_query(
             "conversation": handle_conversation_callback,
             "git": handle_git_callback,
             "export": handle_export_callback,
+            "model": handle_model_callback,
         }
 
         handler = handlers.get(action)
@@ -799,7 +800,7 @@ async def _handle_start_coding_action(
         "<b>Examples:</b>\n"
         '• <i>"Create a Python script that..."</i>\n'
         '• <i>"Help me debug this code..."</i>\n'
-        '• <i>"Explain how this file works..."</i>\n'
+        '• <i>"Review the files in this directory"</i>\n'
         "• Upload a file for review\n\n"
         "I'm here to help with all your coding needs!",
         parse_mode="HTML",
@@ -919,8 +920,39 @@ async def handle_quick_action_callback(
         )
 
         # Run the action through Claude
+        # Keep track of tools for progress updates
+        tool_name_map = {}
+
+        async def action_stream_handler(update_obj):
+            if update_obj.tool_calls:
+                for tc in update_obj.tool_calls:
+                    tc_id = tc.get("id")
+                    tc_name = tc.get("name")
+                    if tc_id and tc_name:
+                        tool_name_map[tc_id] = tc_name
+            
+            if update_obj.type == "tool_result" and update_obj.metadata:
+                tc_id = update_obj.metadata.get("tool_use_id")
+                if tc_id and tc_id in tool_name_map:
+                    update_obj.metadata["tool_name"] = tool_name_map[tc_id]
+
+            from .message import _format_progress_update
+            try:
+                progress_text = await _format_progress_update(update_obj)
+                if progress_text:
+                    await query.edit_message_text(
+                        f"🚀 <b>Executing {action.icon} {escape_html(action.name)}</b>\n\n"
+                        f"{progress_text}",
+                        parse_mode="HTML",
+                    )
+            except Exception:
+                pass
+
         claude_response = await claude_integration.run_command(
-            prompt=action.prompt, working_directory=current_dir, user_id=user_id
+            prompt=action.command,
+            working_directory=current_dir,
+            user_id=user_id,
+            on_stream=action_stream_handler,
         )
 
         if claude_response:
@@ -1314,3 +1346,35 @@ def _escape_markdown(text: str) -> str:
     Legacy name kept for compatibility with callers; actually escapes HTML.
     """
     return escape_html(text)
+
+
+async def handle_model_callback(
+    query, model_name: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle model selection from inline keyboard."""
+    import os
+    from pathlib import Path
+    import re
+    
+    settings: Settings = context.bot_data["settings"]
+    settings.claude_model = model_name
+    os.environ["ANTHROPIC_MODEL"] = model_name
+    
+    env_file = Path("/home/mgdigital/claude-telegram/claude-code-telegram/.env")
+    if env_file.exists():
+        content = env_file.read_text()
+        # Write ANTHROPIC_MODEL
+        if re.search(r"^ANTHROPIC_MODEL=.*", content, flags=re.MULTILINE):
+            content = re.sub(r"^ANTHROPIC_MODEL=.*", f"ANTHROPIC_MODEL={model_name}", content, flags=re.MULTILINE)
+        else:
+            content += f"\nANTHROPIC_MODEL={model_name}\n"
+        
+        # Write CLAUDE_MODEL
+        if re.search(r"^CLAUDE_MODEL=.*", content, flags=re.MULTILINE):
+            content = re.sub(r"^CLAUDE_MODEL=.*", f"CLAUDE_MODEL={model_name}", content, flags=re.MULTILINE)
+        else:
+            content += f"\nCLAUDE_MODEL={model_name}\n"
+        
+        env_file.write_text(content)
+
+    await query.edit_message_text(f"✅ Model switched to: <b>{model_name}</b>", parse_mode="HTML")

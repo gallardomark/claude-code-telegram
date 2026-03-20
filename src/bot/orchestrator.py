@@ -298,7 +298,7 @@ class MessageOrchestrator:
 
     def _register_agentic_handlers(self, app: Application) -> None:
         """Register agentic handlers: commands + text/file/photo."""
-        from .handlers import command
+        from .handlers import command, callback
 
         # Commands
         handlers = [
@@ -307,6 +307,7 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
+            ("model", command.model_command),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -344,11 +345,17 @@ class MessageOrchestrator:
             group=10,
         )
 
-        # Only cd: callbacks (for project selection), scoped by pattern
+        # Only cd: callbacks (for project selection) and model: callbacks
         app.add_handler(
             CallbackQueryHandler(
                 self._inject_deps(self._agentic_callback),
                 pattern=r"^cd:",
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(callback.handle_callback_query),
+                pattern=r"^model:",
             )
         )
 
@@ -372,6 +379,7 @@ class MessageOrchestrator:
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),
+            ("model", command.model_command),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -416,6 +424,7 @@ class MessageOrchestrator:
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("model", "Set OpenRouter model"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -436,6 +445,7 @@ class MessageOrchestrator:
                 BotCommand("export", "Export current session"),
                 BotCommand("actions", "Show quick actions"),
                 BotCommand("git", "Git repository commands"),
+                BotCommand("model", "Set OpenRouter model"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:

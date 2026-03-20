@@ -59,10 +59,43 @@ class ClaudeResponse:
 class StreamUpdate:
     """Streaming update from Claude SDK."""
 
-    type: str  # 'assistant', 'user', 'system', 'result', 'stream_delta'
+    type: str  # 'assistant', 'user', 'system', 'result', 'stream_delta', 'tool_result', 'progress'
     content: Optional[str] = None
     tool_calls: Optional[List[Dict]] = None
     metadata: Optional[Dict] = None
+
+    def is_error(self) -> bool:
+        """Check if this update represents an error."""
+        if self.type == "error":
+            return True
+        if self.type == "tool_result" and self.metadata:
+            return self.metadata.get("is_error", False)
+        return False
+
+    def get_error_message(self) -> str:
+        """Extract error message from the update."""
+        if self.type == "error":
+            return self.content or "Unknown error"
+        if self.type == "tool_result" and self.metadata:
+            if self.metadata.get("is_error"):
+                return self.content or "Tool execution failed"
+        return ""
+
+    def get_progress_percentage(self) -> Optional[float]:
+        """Extract progress percentage if available."""
+        if self.type == "progress" and self.metadata:
+            step = self.metadata.get("step")
+            total = self.metadata.get("total_steps")
+            if step is not None and total:
+                return (step / total) * 100
+            return self.metadata.get("percentage")
+        return None
+
+    def get_tool_names(self) -> List[str]:
+        """Extract tool names from assistant tool calls."""
+        if self.type == "assistant" and self.tool_calls:
+            return [tc.get("name", "tool") for tc in self.tool_calls]
+        return []
 
 
 def _make_can_use_tool_callback(
@@ -138,8 +171,14 @@ class ClaudeSDKManager:
         self.config = config
         self.security_validator = security_validator
 
-        # Set up environment for Claude Code SDK if API key is provided
-        # If no API key is provided, the SDK will use existing CLI authentication
+        # Set up environment for Claude Code SDK
+        # CI=true and NON_INTERACTIVE=true ensure Claude doesn't wait for TTY inputs
+        os.environ["CI"] = "true"
+        os.environ["NON_INTERACTIVE"] = "true"
+        # Ensure stderr is unbuffered for faster real-time streaming
+        os.environ["PYTHONUNBUFFERED"] = "1"
+
+        # If API key is provided, use it
         if config.anthropic_api_key_str:
             os.environ["ANTHROPIC_API_KEY"] = config.anthropic_api_key_str
             logger.info("Using provided API key for Claude SDK authentication")
@@ -348,21 +387,43 @@ class ClaudeSDKManager:
                     previous_session_id=session_id,
                 )
 
-            # Use ResultMessage.result if available, fall back to message extraction
-            if result_content is not None:
+            # Use ResultMessage.result if available (and not empty), fall back to message extraction
+            if result_content:
                 content = result_content
             else:
+                # Better fallback: extract all assistant text and highlight tool errors
                 content_parts = []
+                tool_errors = []
+                
                 for msg in messages:
                     if isinstance(msg, AssistantMessage):
                         msg_content = getattr(msg, "content", [])
                         if msg_content and isinstance(msg_content, list):
                             for block in msg_content:
-                                if hasattr(block, "text"):
+                                if hasattr(block, "text") and block.text:
                                     content_parts.append(block.text)
-                        elif msg_content:
-                            content_parts.append(str(msg_content))
-                content = "\n".join(content_parts)
+                        elif msg_content and isinstance(msg_content, str):
+                            content_parts.append(msg_content)
+                    
+                    # Also check for tool errors
+                    try:
+                        from claude_agent_sdk import ToolResultMessage
+                        if isinstance(msg, ToolResultMessage):
+                            if getattr(msg, "is_error", False):
+                                error_text = getattr(msg, "content", "Unknown error")
+                                tool_errors.append(f"Tool Error: {error_text}")
+                    except ImportError:
+                        pass
+                
+                if not content_parts and not tool_errors:
+                    content = ""
+                else:
+                    parts = []
+                    if content_parts:
+                        parts.append("\n".join(content_parts))
+                    if tool_errors:
+                        parts.append("\n---\n" + "\n".join(tool_errors))
+                    content = "\n\n".join(parts)
 
             return ClaudeResponse(
                 content=content,
@@ -506,6 +567,14 @@ class ClaudeSDKManager:
                                 content=text,
                             )
                             await stream_callback(update)
+                elif event.get("type") == "progress":
+                    # Handle progress event (custom for some versions/mcp)
+                    update = StreamUpdate(
+                        type="progress",
+                        content=event.get("content", "Working..."),
+                        metadata=event.get("progress", {}),
+                    )
+                    await stream_callback(update)
 
             elif isinstance(message, UserMessage):
                 content = getattr(message, "content", "")
@@ -515,6 +584,31 @@ class ClaudeSDKManager:
                         content=content,
                     )
                     await stream_callback(update)
+            
+            # Use dynamic import/getattr to safely check for newer message types
+            message_type_name = type(message).__name__
+            
+            if message_type_name == "ToolResultMessage":
+                update = StreamUpdate(
+                    type="tool_result",
+                    content=str(getattr(message, "content", "")),
+                    metadata={
+                        "tool_use_id": getattr(message, "tool_use_id", None),
+                        "is_error": getattr(message, "is_error", False),
+                    }
+                )
+                await stream_callback(update)
+                
+            elif message_type_name == "ProgressMessage":
+                update = StreamUpdate(
+                    type="progress",
+                    content=getattr(message, "text", "Working..."),
+                    metadata={
+                        "step": getattr(message, "step", None),
+                        "total_steps": getattr(message, "total_steps", None),
+                    }
+                )
+                await stream_callback(update)
 
         except Exception as e:
             logger.warning("Stream callback failed", error=str(e))

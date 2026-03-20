@@ -735,6 +735,32 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logger.error("Error in change_directory command", error=str(e), user_id=user_id)
 
 
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /model command to switch Claude models."""
+    settings: Settings = context.bot_data["settings"]
+    current = getattr(settings, "claude_model", "unknown")
+    
+    available_models = [
+        "openrouter/free",
+        "minimax/minimax-m2.5:free",
+        "minimax/minimax-m2.5"
+    ]
+    
+    keyboard = []
+    for model in available_models:
+        keyboard.append([InlineKeyboardButton(f"Select: {model}", callback_data=f"model:{model}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"Current model: <b>{current}</b>\n\n"
+        f"Select a new model below:",
+        parse_mode="HTML",
+        reply_markup=reply_markup
+    )
+
+
+
 async def print_working_directory(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:

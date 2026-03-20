@@ -33,10 +33,13 @@ async def _format_progress_update(update_obj) -> Optional[str]:
     """Format progress updates with enhanced context and visual indicators."""
     if update_obj.type == "tool_result":
         # Show tool completion status
-        tool_name = "Unknown"
-        if update_obj.metadata and update_obj.metadata.get("tool_use_id"):
-            # Try to extract tool name from context if available
-            tool_name = update_obj.metadata.get("tool_name", "Tool")
+        tool_name = "Tool"
+        if update_obj.metadata:
+            tool_name = (
+                update_obj.metadata.get("tool_name")
+                or update_obj.metadata.get("name")
+                or "Tool"
+            )
 
         if update_obj.is_error():
             return f"❌ <b>{tool_name} failed</b>\n\n<i>{update_obj.get_error_message()}</i>"
@@ -56,11 +59,13 @@ async def _format_progress_update(update_obj) -> Optional[str]:
             # Create a simple progress bar
             filled = int(percentage / 10)  # 0-10 scale
             bar = "█" * filled + "░" * (10 - filled)
-            progress_text += f"\n\n<code>{bar}</code> {percentage}%"
+            progress_text += f"\n\n<code>{bar}</code> {int(percentage)}%"
 
-        if update_obj.progress:
-            step = update_obj.progress.get("step")
-            total_steps = update_obj.progress.get("total_steps")
+        if update_obj.metadata and (
+            "step" in update_obj.metadata or "total_steps" in update_obj.metadata
+        ):
+            step = update_obj.metadata.get("step")
+            total_steps = update_obj.metadata.get("total_steps")
             if step and total_steps:
                 progress_text += f"\n\nStep {step} of {total_steps}"
 
@@ -357,9 +362,25 @@ async def handle_text_message(
 
         # MCP image collection via stream intercept
         mcp_images: list[ImageAttachment] = []
+        
+        # Tool name tracking for better progress updates
+        tool_name_map = {}
 
         # Enhanced stream updates handler with progress tracking
         async def stream_handler(update_obj):
+            # Track tool names for tool_result messages
+            if update_obj.tool_calls:
+                for tc in update_obj.tool_calls:
+                    tc_id = tc.get("id")
+                    tc_name = tc.get("name")
+                    if tc_id and tc_name:
+                        tool_name_map[tc_id] = tc_name
+            
+            if update_obj.type == "tool_result" and update_obj.metadata:
+                tc_id = update_obj.metadata.get("tool_use_id")
+                if tc_id and tc_id in tool_name_map:
+                    update_obj.metadata["tool_name"] = tool_name_map[tc_id]
+
             # Intercept send_image_to_user MCP tool calls.
             # The SDK namespaces MCP tools as "mcp__<server>__<tool>".
             if update_obj.tool_calls:
@@ -819,11 +840,37 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # Process with Claude
         try:
+            # Persistent tool tracking for the duration of this document process
+            tool_name_map = {}
+
+            async def doc_stream_handler(update_obj):
+                if update_obj.tool_calls:
+                    for tc in update_obj.tool_calls:
+                        tc_id = tc.get("id")
+                        tc_name = tc.get("name")
+                        if tc_id and tc_name:
+                            tool_name_map[tc_id] = tc_name
+                
+                if update_obj.type == "tool_result" and update_obj.metadata:
+                    tc_id = update_obj.metadata.get("tool_use_id")
+                    if tc_id and tc_id in tool_name_map:
+                        update_obj.metadata["tool_name"] = tool_name_map[tc_id]
+
+                try:
+                    progress_text = await _format_progress_update(update_obj)
+                    if progress_text:
+                        await claude_progress_msg.edit_text(
+                            progress_text, parse_mode="HTML"
+                        )
+                except Exception as e:
+                    logger.debug("Failed to update doc progress", error=str(e))
+
             claude_response = await claude_integration.run_command(
                 prompt=prompt,
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=session_id,
+                on_stream=doc_stream_handler,
             )
 
             # Update session ID
